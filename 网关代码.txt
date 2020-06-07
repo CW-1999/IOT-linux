@@ -1,0 +1,192 @@
+#include <stdio.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include<sys/socket.h>
+#include<sys/types.h>
+#include<arpa/inet.h>
+#include<netinet/in.h>
+#include<strings.h>
+#include <termios.h>
+#include <string.h>
+#include <mysql/mysql.h>
+#include <pthread.h>
+#define MAXCONN 8
+struct session_message{
+    int comm_fd;
+    int ipport;
+    char ipaddr[16];
+    char dhtdata[5];
+};
+void *session_thread(void *arg)
+{
+    struct session_message *p=(struct session_message *)arg;
+    printf("addr:%p",p);
+    int comm_fd=p->comm_fd;
+    int ipport=p->ipport;
+    char ipaddr[16];
+    char dhtbuff[4];
+    sprintf(ipaddr,"%s",p->ipaddr);
+    sprintf(dhtbuff,"%s",p->dhtdata);
+    free(p);
+    while (1)
+    {
+        int count;
+        count=write(comm_fd,dhtbuff,4);
+        if (count>0)
+        {
+            printf("OK\n");
+            sleep(3);
+        }else
+        {
+            printf("A talking is over!\n");
+            break;
+        }
+    }
+    
+}
+int getdht11(char *data);
+int tcpserver(char *dhtdata);
+int mysql(char *data1,char *data2);
+void *thread_tcp(void *arg);
+int main()
+{
+    int send=0;
+    char recv[100];
+    int rettcp;
+    pthread_t thread_tcpserver;
+	int fd;
+	int count=0;
+	char buffer[]="234";
+    char strinput[10];
+    char use;
+	struct termios uart_cfg;
+	fd=open("/dev/ttyS4",O_RDWR|O_NONBLOCK|O_NOCTTY);
+	if(fd<0)
+	{
+		perror("Failed to open serial:");
+		return -1;
+	}
+    fcntl(fd,F_SETFL,0);
+	cfmakeraw(&uart_cfg);//原始模式
+	cfsetspeed(&uart_cfg,B115200);	
+    uart_cfg.c_cflag|=CLOCAL|CREAD;//本地连接和接收使能
+	tcflush(fd,TCIOFLUSH);//清除缓冲区
+	tcsetattr(fd,TCSANOW,&uart_cfg);//激活配置
+
+    rettcp=pthread_create(&thread_tcpserver,NULL,thread_tcp,&recv);
+    if (rettcp!=0)
+    {
+         perror("Create thread_tcpserver failed!\r\n");
+    }
+	while(1)
+	{
+        //printf("please input a num:");
+        //scanf("%s",strinput);
+        //write(fd,strinput,9);
+        count=read(fd,recv,20);
+        if(count>0)
+        {
+            recv[count]=0;
+            //printf("STR:%s\r\n",recv);
+            getdht11(recv);
+            //tcpserver(recv);
+            //send=1;
+        }        
+	}
+	close(fd);
+	return 0;
+}
+int getdht11(char *data)
+{
+    char temp[3];
+    char humid[3];
+    temp[0]=data[0];
+    temp[1]=data[1];
+    humid[0]=data[2];
+    humid[1]=data[3];
+    //printf("data:%s\r\n",data);
+    printf("temp:%s\n",temp);
+    printf("humid:%s\r\n",humid);
+    mysql(temp,humid);
+}
+int mysql(char *data1,char *data2)
+{
+    char sql_command[256];
+    MYSQL_RES *pRes;
+    MYSQL_ROW hrow;
+    MYSQL mysql_handler;
+    if(mysql_init(&mysql_handler)==NULL)
+    {
+        printf("%s\n",mysql_error(&mysql_handler));
+        return -1;
+    }
+    else
+    {
+        printf("数据库连接句柄初始化成功！\n");
+    }
+    //链接数据库
+    if(mysql_real_connect(&mysql_handler,"121.37.233.255","ljy","ljyiot","dht11",0,NULL,0)==NULL)
+    {
+        printf("%s\n",mysql_error(&mysql_handler));
+        return -1;
+    }
+    //构建一个sql命令库
+    mysql_query(&mysql_handler,"SET NAMES UTF8");
+    sprintf(sql_command,"insert into dht(temp,humid) values(%s,%s)",data1,data2);
+    printf("\n****************\n");
+    if (mysql_query(&mysql_handler,sql_command)!=0)
+    {
+        printf("%s\n",mysql_error(&mysql_handler));
+        return -1;
+    }
+    else
+    {
+        printf("Success insert\r\n");
+    }
+    
+    mysql_close(&mysql_handler); 
+}
+void *thread_tcp(void *arg)
+{
+    pthread_t tid;
+    struct session_message *pd=malloc(sizeof(struct session_message));
+    int listen_fd,comm_fd;
+    int ret;
+    int i=1;
+    struct sockaddr_in server_addr,client_addr;
+	int sock_size=sizeof(struct sockaddr_in);
+	listen_fd=socket(AF_INET,SOCK_STREAM,0);//第一步socket
+	if(listen_fd<0)
+	{
+		perror("Failed to create socket:");
+		return -1;
+	}
+	bzero(&server_addr,sock_size);//给套接字清零
+	server_addr.sin_family=AF_INET;
+	server_addr.sin_port=htons(8000);
+	server_addr.sin_addr.s_addr=INADDR_ANY;
+	setsockopt(listen_fd,SOL_SOCKET,SO_REUSEADDR,&i,sizeof(int));//作用：对socket创建的套接口进行属性上的详细设置。 SOL_SOCKET：基本套接口 SO_REUSEADDR:独占端口
+	ret=bind(listen_fd,(struct sockaddr*)&server_addr,sock_size);//第二步绑定
+	if(ret==0)
+	{
+		printf("Bind Successfully!\n");
+	}
+	ret=listen(listen_fd,MAXCONN);//第三步 8表示最多允许8个请求在等待处理
+	if(ret==0)
+	{
+		printf("Listen Successfully!\n");
+	}
+	while((comm_fd=accept(listen_fd,(struct sockaddr*)&client_addr,&sock_size))>=0)//第四步accept
+	{
+		char ipaddr[16];
+		inet_ntop(AF_INET,&client_addr.sin_addr.s_addr,ipaddr,16); //将数值格式转化为点分十进制的ip地址格式
+		printf("A connection come on:%s\n",ipaddr);
+        pd->comm_fd=comm_fd;
+        pd->ipport=client_addr.sin_port;
+        sprintf(pd->ipaddr,"%s",ipaddr);
+        sprintf(pd->dhtdata,"%s",(char *)arg);
+        ret=pthread_create(&tid,NULL,session_thread,pd);
+        
+	}
+	close(listen_fd);
+}
